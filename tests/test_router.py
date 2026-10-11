@@ -48,7 +48,7 @@ def check(name: str, cond: bool, detail: str = "") -> bool:
 def offline() -> list[bool]:
     r = []
     d = jr.decide(fake_answers("trivial"), CFG, "opus", "high", 0)
-    r.append(check("trivial on opus/high asks for both", d["action"] == "model+effort" and d["model"] == "haiku" and d["effort"] == "low", d["action"]))
+    r.append(check("trivial on opus/high asks for both", d["action"] == "model+effort" and jr.family(d["model"]) == "haiku" and d["effort"] == "low", d["action"]))
     d = jr.decide(fake_answers("hard"), CFG, "opus", "high", 0)
     r.append(check("hard on opus/high changes nothing", d["action"] == "none", d["action"]))
     d = jr.decide(fake_answers("routine"), CFG, "sonnet", "high", 0)
@@ -66,7 +66,7 @@ def offline() -> list[bool]:
     r.append(check("redaction strips secrets", "abc123" not in red and "ABCDEFGHIJ" not in red, red))
     r.append(check("automated prompts are skipped", bool(jr.AUTOMATED_PROMPT.match("<scheduled-task id=1>")) and not jr.AUTOMATED_PROMPT.match("fix it")))
     line = jr.user_line(jr.decide(fake_answers("trivial"), CFG, "opus", "high", 0))
-    r.append(check("user line names both commands", "/model haiku" in line and "/effort low" in line, line))
+    r.append(check("user line names both commands", "/model claude-haiku-5-5" in line and "/effort low" in line, line))
     return r
 
 
@@ -88,6 +88,31 @@ def hook_roundtrip() -> list[bool]:
             r.append(check("unavailable Jev fails open with no output", buf.getvalue() == ""))
             rows = [json.loads(l) for l in jr.LOG.read_text().splitlines()]
             r.append(check("unavailable path is logged without prompt text", any(x["event"] == "unavailable" for x in rows) and "flag" not in jr.LOG.read_text()))
+            os.environ["JEV_ROUTER_PLUGIN"] = "1"
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                jr.on_prompt({"session_id": "s1", "prompt": "what does git stash pop do?"})
+            os.environ.pop("JEV_ROUTER_PLUGIN", None)
+            r.append(check("command hook stands down when the plugin is active", buf.getvalue() == ""))
+            jr.ask_backup = jr.ask
+            jr.ask = lambda *a, **k: {"answers": fake_answers("trivial"), "model": "fake"}
+            try:
+                jr.on_session({"session_id": "s2", "model": "claude-opus-5-5"})
+                os.environ["CLAUDE_EFFORT"] = "high"
+                buf = io.StringIO()
+                with redirect_stdout(buf):
+                    jr.on_prompt({"session_id": "s2", "prompt": "what does git stash pop do?", "transcript_path": "/nonexistent"})
+                out = json.loads(buf.getvalue())
+                r.append(check("model mismatch blocks the prompt with the /model command", out.get("decision") == "block" and "/model claude-haiku-5-5" in out.get("reason", ""), buf.getvalue()[:160]))
+                jr.on_switched({"session_id": "s2", "to_model": "claude-haiku-5-5", "source": "command"})
+                buf = io.StringIO()
+                with redirect_stdout(buf):
+                    jr.on_prompt({"session_id": "s2", "prompt": "what does git stash pop do?", "transcript_path": "/nonexistent"})
+                out = json.loads(buf.getvalue())
+                r.append(check("effort-only mismatch does not block", "decision" not in out and "/effort low" in out.get("systemMessage", ""), buf.getvalue()[:160]))
+            finally:
+                jr.ask = jr.ask_backup
+                os.environ.pop("CLAUDE_EFFORT", None)
         finally:
             os.environ.pop("JEV_ROUTER", None)
             jr.STATE_DIR, jr.LOG = old_state, old_log

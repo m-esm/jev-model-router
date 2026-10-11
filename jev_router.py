@@ -223,7 +223,7 @@ def user_line(d: dict) -> str:
     if d["action"] in ("effort", "model+effort", "suggest"):
         parts.append(f"/effort {d['effort']}")
     now = f"{d['current_model'] or '?'}/{d['current_effort'] or '?'}"
-    return f"jev-router: {d['level']} prompt (p={d['confidence']:.2f}) wants {d['model']}/{d['effort']}, now {now}. Run: " + " then ".join(parts)
+    return f"jev-router: {d['level']} prompt (p={d['confidence']:.2f}) wants {family(d['model'])}/{d['effort']}, now {now}. Run: " + " then ".join(parts)
 
 
 def context_block(d: dict) -> str:
@@ -235,10 +235,8 @@ def context_block(d: dict) -> str:
     }[d["level"]]
     switch = ""
     if d["action"] != "none":
-        switch = (
-            f" The router asked the user to run /model {d['model']} and /effort {d['effort']} before the next turn. "
-            "Do not attempt to switch the model or effort yourself: no hook or tool can re-price the running session."
-        )
+        switch = f" The router asked the user to run /effort {d['effort']} before the next turn. Do not try to change the model or effort yourself."
+
     return (
         f"JEV ROUTER: this prompt scored `{d['level']}` (p={d['confidence']:.2f}), "
         f"fit {d['model']}/{d['effort']}. {depth}{switch}"
@@ -255,7 +253,7 @@ def transcript_size(path: str | None) -> int:
 def on_prompt(data: dict) -> int:
     prompt = str(data.get("prompt") or "")
     session_id = str(data.get("session_id") or "")
-    if AUTOMATED_PROMPT.match(prompt):
+    if AUTOMATED_PROMPT.match(prompt) or os.environ.get("JEV_ROUTER_PLUGIN"):
         return 0
     cfg = load_config()
     clean = redact(prompt)[: cfg["max_prompt_chars"]].strip()
@@ -277,6 +275,9 @@ def on_prompt(data: dict) -> int:
     d = decide(answers, cfg, current_model, current_effort, transcript_size(data.get("transcript_path")))
     log({**row, "event": "decision", "jev_model": resp.get("model"), "ms": int((time.monotonic() - t0) * 1000), **{k: d[k] for k in ("level", "confidence", "followup", "model", "effort", "current_model", "current_effort", "action")}})
     write_state(session_id, {**state, "last": d, "effort": current_effort or state.get("effort")})
+    if d["action"] in ("model", "model+effort") and cfg.get("block_on_model_mismatch"):
+        print(json.dumps({"decision": "block", "reason": user_line(d) + ". Then send the prompt again. Set block_on_model_mismatch to false in router.json to get a notice instead."}))
+        return 0
     out: dict = {"hookSpecificOutput": {"hookEventName": "UserPromptSubmit", "additionalContext": context_block(d)}}
     if d["action"] != "none":
         out["systemMessage"] = user_line(d)
