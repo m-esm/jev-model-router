@@ -1,0 +1,15 @@
+{
+  "ladder": {
+    "trivial": {"model": "haiku", "effort": "low"},
+    "routine": {"model": "sonnet", "effort": "medium"},
+    "hard": {"model": "opus", "effort": "high"},
+    "frontier": {"model": "opus", "effort": "max"}
+  },
+  "min_confidence": 0.55,
+  "followup_min": 0.70,
+  "min_prompt_chars": 4,
+  "max_prompt_chars": 4000,
+  "timeout_s": 3.5,
+  "recache_guard_bytes": 1500000,
+  "jev_model": "jev-latest"
+}
