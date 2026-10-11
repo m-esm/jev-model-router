@@ -82,6 +82,7 @@ It re-scores every labeled row and prints a per-row verdict and a confusion matr
 
 ```bash
 claude plugin validate .
+claude plugin test .                  # hooks/register.test.ts: pickModel, decide, prompt.submit, turn.step
 python3 jev_router.py --test          # decision table, hook round trip, block rule, redaction
 python3 jev_router.py --test --live   # plus the live calibration cases against Jev
 python3 jev_router.py report --days 7
