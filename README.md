@@ -6,7 +6,8 @@ A Claude Code plugin that scores every prompt with [TypeSafe Jev](https://docs.t
 
 1. `prompt.submit`: the redacted prompt goes to Jev with two questions in one call, a four-level `score` (trivial, routine, hard, frontier) and a `noul` asking whether the prompt is a follow-up to work already in progress. The level maps to a model and effort through the ladder in `router.json`. A short context block tells Claude the level and how deep to work.
 2. `turn.step`: every model request of that turn is rewritten to the chosen effort, and to a stronger model when the rung names a `min_model` the session falls below. A request already on that model keeps its exact id. The default ladder never downgrades: a rung with an explicit `model` cheaper than the session's model is applied only when writing the context to that model's cache costs less than reading it from the current model's warm cache. The status line says when a downgrade was refused.
-3. The status line under the prompt shows the decision. Scores, timings and costs go to `~/.claude/cache/jev-router/log.jsonl`, never prompt text.
+3. When the pick is a different model, the plugin also moves the session's own model through the `/config` Model row (`$.config.set`). The engine fires `PostModelSwitch` with source `command`, the model picker in the CLI and the desktop app follows, and later turns start on that model without a rewrite. The turn in flight still gets the per-request rewrite from step 2, because a session switch applies from the next turn. A `[1m]` suffix on the session's model is kept on Sonnet, Opus and Fable. Set `switch_session_model` to false to keep the picker untouched. Effort has no config row, so it stays a per-request rewrite and the effort menu keeps showing the session default.
+4. The status line under the prompt shows the decision. Scores, timings and costs go to `~/.claude/cache/jev-router/log.jsonl`, never prompt text.
 
 Measured on Claude Code 2.1.296 with the wire probe in `scripts/`: the rewritten request reaches the API with the new `model` and `output_config.effort`, and the assistant message comes back from that model.
 
@@ -59,6 +60,7 @@ Copy `router.json` to `~/.config/jev-router/router.json` or point `JEV_ROUTER_CO
 | `followup_min` | 0.70 | At or above this the prompt counts as a follow-up and nothing changes. |
 | `pricing_usd_per_mtok` | list prices | Per family: `input`, `cache_read`, and the over-100K tiers for Haiku. |
 | `cache_write_multiplier` | 1.25 | 1.25 for the 5-minute cache, 2 for the 1-hour cache. |
+| `switch_session_model` | true | Also move the session's own model (and the picker) when the pick differs. |
 | `sample_rate` | 0 | Fraction of prompts to copy, redacted, into `samples.jsonl` for labeling. See Eval. |
 | `block_on_model_mismatch` | true | Command-hook fallback only. |
 | `timeout_s` | 3.5 | Jev call timeout. On timeout the turn runs unchanged. |

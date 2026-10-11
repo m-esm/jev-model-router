@@ -49,6 +49,7 @@ type Config = {
   pricing_usd_per_mtok: Record<string, PriceRow>
   cache_write_multiplier: number
   sample_rate: number
+  switch_session_model: boolean
 }
 
 type Answers = {
@@ -172,6 +173,22 @@ function pickModel(cfg: Config, decision: Decision, current: string, contextToke
   return { model: current, kind: 'refused', writeUsd, readUsd }
 }
 
+async function switchSession($: EngineInterface, cfg: Config, decision: Decision): Promise<void> {
+  if (!cfg.switch_session_model) return
+  const current = await $.session.model()
+  const contextTokens = (await $.session.usage()).context.tokens ?? 0
+  const pick = pickModel(cfg, decision, current, contextTokens)
+  if (pick.kind !== 'upgrade' && pick.kind !== 'downgrade') return
+  const fam = family(pick.model)
+  if (!fam) return
+  const row = (await $.config.list()).find(r => r.key === 'model')
+  const rowValue = String((row as { value?: unknown } | undefined)?.value ?? '')
+  const longContext = rowValue.endsWith('[1m]') && fam !== 'haiku'
+  const value = longContext ? `${fam}[1m]` : fam
+  const result = await $.config.set({ key: 'model', value })
+  await log($, { event: 'session_switch', kind: pick.kind, from_model: family(current), to: value, denied: 'deny' in result ? String(result.deny).slice(0, 120) : null, context_tokens: contextTokens })
+}
+
 async function sample($: EngineInterface, cfg: Config, prompt: string, decision: Decision, answers: Answers): Promise<void> {
   if (!(cfg.sample_rate > 0) || Math.random() >= cfg.sample_rate) return
   try {
@@ -253,6 +270,13 @@ export const register: Register = on => {
       return next(e)
     }
     await $.state.set(DECISION, decision)
+    if (decision.apply) {
+      try {
+        await switchSession($, cfg, decision)
+      } catch (err) {
+        await log($, { event: 'session_switch', error: String(err).slice(0, 120) })
+      }
+    }
     await log($, {
       event: 'decision',
       jev_model: jevModel,

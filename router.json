@@ -43,5 +43,6 @@
       "cache_read": 0.25
     }
   },
-  "sample_rate": 0
+  "sample_rate": 0,
+  "switch_session_model": true
 }
