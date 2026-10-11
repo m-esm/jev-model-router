@@ -5,6 +5,7 @@ const DECISION = { plugin: 'jev-model-router', key: 'decision' } as const
 const API_URL = 'https://api.typesafe.ai/v1/systemone'
 const LEVELS: readonly Level[] = ['trivial', 'routine', 'hard', 'frontier']
 const FAMILIES = ['haiku', 'sonnet', 'opus', 'fable'] as const
+const RANK: Record<string, number> = { haiku: 0, sonnet: 1, opus: 2, fable: 3 }
 const AUTOMATED = /^\s*<(scheduled-task|task-notification|ci-monitor-event)\b/
 const SYSTEM_REMINDER = /<system-reminder>[\s\S]*?<\/system-reminder>/g
 const PEM = /-----BEGIN [^\n]*?-----[\s\S]*?-----END [^\n]*?-----/g
@@ -35,17 +36,19 @@ const QUESTIONS = {
   },
 }
 
+type Rung = { effort: Effort; model?: string; min_model?: string }
+type PriceRow = { input: number; input_over_100k?: number; cache_read: number; cache_read_over_100k?: number }
 type Config = {
-  ladder: Record<Level, { model: string; effort: Effort }>
+  ladder: Record<Level, Rung>
   min_confidence: number
   followup_min: number
   min_prompt_chars: number
   max_prompt_chars: number
   timeout_s: number
   jev_model: string
-  pricing_input_usd_per_mtok: Record<string, { input: number; input_over_100k?: number }>
+  pricing_usd_per_mtok: Record<string, PriceRow>
   cache_write_multiplier: number
-  max_downgrade_usd: number
+  sample_rate: number
 }
 
 type Answers = {
@@ -130,19 +133,57 @@ function decide(answers: Answers, cfg: Config, at: number): Decision {
   const { level, confidence } = argmaxLevel(answers.level)
   const followup = answers.followup?.noul ?? 0
   const target = cfg.ladder[level]
-  const d: Decision = { level, confidence, followup, model: target.model, effort: target.effort, apply: true, reason: '', at }
+  const d: Decision = { level, confidence, followup, model: target.model, minModel: target.min_model, effort: target.effort, apply: true, reason: '', at }
   if (followup >= cfg.followup_min) return { ...d, apply: false, reason: 'follow-up to work in progress' }
   if (confidence < cfg.min_confidence) return { ...d, apply: false, reason: `confidence ${confidence.toFixed(2)} under ${cfg.min_confidence}` }
   return d
 }
 
-function inputPrice(cfg: Config, fam: string | undefined, contextTokens: number): number {
-  const row = cfg.pricing_input_usd_per_mtok[fam ?? ''] ?? { input: Math.max(...Object.values(cfg.pricing_input_usd_per_mtok).map(r => r.input)) }
-  return contextTokens > 100_000 && row.input_over_100k !== undefined ? row.input_over_100k : row.input
+function priceRow(cfg: Config, fam: string | undefined): PriceRow {
+  return cfg.pricing_usd_per_mtok[fam ?? ''] ?? Object.values(cfg.pricing_usd_per_mtok).reduce((a, b) => (b.input > a.input ? b : a))
 }
 
-function rewriteCostUsd(cfg: Config, fam: string | undefined, contextTokens: number): number {
-  return (contextTokens / 1_000_000) * inputPrice(cfg, fam, contextTokens) * cfg.cache_write_multiplier
+function cacheWriteUsd(cfg: Config, fam: string | undefined, contextTokens: number): number {
+  const row = priceRow(cfg, fam)
+  const input = contextTokens > 100_000 && row.input_over_100k !== undefined ? row.input_over_100k : row.input
+  return (contextTokens / 1_000_000) * input * cfg.cache_write_multiplier
+}
+
+function cacheReadUsd(cfg: Config, fam: string | undefined, contextTokens: number): number {
+  const row = priceRow(cfg, fam)
+  const read = contextTokens > 100_000 && row.cache_read_over_100k !== undefined ? row.cache_read_over_100k : row.cache_read
+  return (contextTokens / 1_000_000) * read
+}
+
+type Pick = { model: string; kind: 'keep' | 'upgrade' | 'downgrade' | 'refused'; writeUsd: number; readUsd: number }
+
+function pickModel(cfg: Config, decision: Decision, current: string, contextTokens: number): Pick {
+  const cur = family(current)
+  const curRank = RANK[cur ?? ''] ?? -1
+  const wanted = decision.model ?? decision.minModel
+  const want = family(wanted)
+  const wantRank = RANK[want ?? ''] ?? -1
+  const readUsd = cacheReadUsd(cfg, cur, contextTokens)
+  if (!wanted || want === cur || wantRank < 0) return { model: current, kind: 'keep', writeUsd: 0, readUsd }
+  const writeUsd = cacheWriteUsd(cfg, want, contextTokens)
+  if (wantRank > curRank) return { model: wanted, kind: 'upgrade', writeUsd, readUsd }
+  if (decision.minModel && !decision.model) return { model: current, kind: 'keep', writeUsd, readUsd }
+  if (writeUsd < readUsd) return { model: wanted, kind: 'downgrade', writeUsd, readUsd }
+  return { model: current, kind: 'refused', writeUsd, readUsd }
+}
+
+async function sample($: EngineInterface, cfg: Config, prompt: string, decision: Decision, answers: Answers): Promise<void> {
+  if (!(cfg.sample_rate > 0) || Math.random() >= cfg.sample_rate) return
+  try {
+    const home = await $.env.get('HOME')
+    const dir = (await $.env.get('JEV_ROUTER_STATE')) || `${home}/.claude/cache/jev-router`
+    const path = `${dir}/samples.jsonl`
+    const existing = (await $.fs.exists(path)) ? await $.fs.read(path) : ''
+    const row = { ts: new Date().toISOString(), prompt, jev_level: decision.level, probabilities: answers.level?.probabilities ?? {}, followup: decision.followup, label: null }
+    await $.fs.write(path, `${existing}${JSON.stringify(row)}\n`)
+  } catch {
+    return
+  }
 }
 
 async function forcedAnswers($: EngineInterface): Promise<Answers | undefined> {
@@ -203,6 +244,7 @@ export const register: Register = on => {
         const resp = await askJev($, key, cfg, clean, next.signal)
         jevModel = resp.model
         decision = decide(resp.answers ?? {}, cfg, started)
+        await sample($, cfg, clean, decision, resp.answers ?? {})
       }
     } catch (err) {
       await $.state.set(DECISION, null)
@@ -219,16 +261,16 @@ export const register: Register = on => {
       level: decision.level,
       confidence: Number(decision.confidence.toFixed(3)),
       followup: Number(decision.followup.toFixed(3)),
-      model: decision.model,
+      model: decision.model ?? decision.minModel ?? null,
       effort: decision.effort,
       apply: decision.apply,
     })
     $.ui.status(
       decision.apply
-        ? `jev: ${decision.level} (${decision.confidence.toFixed(2)}) routes to ${decision.model}/${decision.effort}`
+        ? `jev: ${decision.level} (${decision.confidence.toFixed(2)}) routes to ${family(decision.model ?? decision.minModel) ?? 'current model'}/${decision.effort}`
         : `jev: ${decision.level} (${decision.confidence.toFixed(2)}), kept: ${decision.reason}`,
     )
-    const block = `JEV ROUTER: this prompt scored \`${decision.level}\` (p=${decision.confidence.toFixed(2)}), ${decision.apply ? `and this turn runs on ${decision.model}/${decision.effort}` : `setting kept (${decision.reason})`}. ${depth(decision.level)}`
+    const block = `JEV ROUTER: this prompt scored \`${decision.level}\` (p=${decision.confidence.toFixed(2)}), ${decision.apply ? `and this turn runs at effort ${decision.effort}${decision.minModel ? ` on at least ${family(decision.minModel)}` : ''}` : `setting kept (${decision.reason})`}. ${depth(decision.level)}`
     return next({ ...e, context: [...(e.context ?? []), block] })
   })
 
@@ -238,24 +280,19 @@ export const register: Register = on => {
     if (!decision || !decision.apply) return yield* next(e)
     const cfg = await loadConfig($)
     const contextTokens = (await $.session.usage()).context.tokens ?? 0
-    const fromFamily = family(e.model)
-    const toFamily = family(decision.model)
-    const isDowngrade = inputPrice(cfg, toFamily, contextTokens) < inputPrice(cfg, fromFamily, contextTokens)
-    const cost = fromFamily === toFamily ? 0 : rewriteCostUsd(cfg, toFamily, contextTokens)
-    const tooExpensive = isDowngrade && cost > cfg.max_downgrade_usd
-    const model = fromFamily === toFamily || tooExpensive ? e.model : decision.model
+    const pick = pickModel(cfg, decision, e.model, contextTokens)
     const effort = e.effort === undefined ? undefined : decision.effort
-    if (model === e.model && effort === e.effort) {
-      if (e.index === 0 && tooExpensive) {
-        $.ui.status(`jev: ${decision.level} wants ${toFamily}/${decision.effort}, kept ${fromFamily}: re-caching ${contextTokens} tokens would cost ${cost.toFixed(2)} USD, cap ${cfg.max_downgrade_usd} USD`)
-        await log($, { event: 'kept', reason: 'cost', context_tokens: contextTokens, cost_usd: Number(cost.toFixed(4)) })
+    if (pick.model === e.model && effort === e.effort) {
+      if (e.index === 0 && pick.kind === 'refused') {
+        $.ui.status(`jev: ${decision.level} wants ${family(decision.model)}, kept ${family(e.model)}: writing ${contextTokens} tokens there (${pick.writeUsd.toFixed(3)} USD) costs more than reading the warm cache (${pick.readUsd.toFixed(3)} USD)`)
+        await log($, { event: 'kept', reason: 'cost', context_tokens: contextTokens, write_usd: Number(pick.writeUsd.toFixed(4)), read_usd: Number(pick.readUsd.toFixed(4)) })
       }
       return yield* next(e)
     }
     if (e.index === 0) {
-      $.ui.status(`jev: ${decision.level} (${decision.confidence.toFixed(2)}) runs on ${family(model)}/${effort ?? '?'}`)
-      await log($, { event: 'applied', from_model: fromFamily, to_model: family(model), from_effort: e.effort, to_effort: effort, context_tokens: contextTokens, recache_usd: Number((model === e.model ? 0 : cost).toFixed(4)) })
+      $.ui.status(`jev: ${decision.level} (${decision.confidence.toFixed(2)}) runs on ${family(pick.model)}/${effort ?? '?'}${pick.kind === 'keep' ? '' : ` (${pick.kind})`}`)
+      await log($, { event: 'applied', kind: pick.kind, from_model: family(e.model), to_model: family(pick.model), from_effort: e.effort, to_effort: effort, context_tokens: contextTokens, write_usd: Number(pick.writeUsd.toFixed(4)), read_usd: Number(pick.readUsd.toFixed(4)) })
     }
-    return yield* next(effort === undefined ? { ...e, model } : { ...e, model, effort })
+    return yield* next(effort === undefined ? { ...e, model: pick.model } : { ...e, model: pick.model, effort })
   })
 }

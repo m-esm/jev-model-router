@@ -1,20 +1,18 @@
 {
   "ladder": {
     "trivial": {
-      "model": "claude-haiku-5-5",
       "effort": "low"
     },
     "routine": {
-      "model": "claude-sonnet-5-5",
       "effort": "medium"
     },
     "hard": {
-      "model": "claude-opus-5-5",
+      "min_model": "claude-opus-5-5",
       "effort": "high"
     },
     "frontier": {
-      "model": "claude-opus-5-5",
-      "effort": "max"
+      "min_model": "claude-opus-5-5",
+      "effort": "high"
     }
   },
   "min_confidence": 0.55,
@@ -22,24 +20,28 @@
   "min_prompt_chars": 4,
   "max_prompt_chars": 4000,
   "timeout_s": 3.5,
-  "recache_guard_bytes": 1500000,
   "jev_model": "jev-latest",
   "cache_write_multiplier": 1.25,
   "block_on_model_mismatch": true,
-  "pricing_input_usd_per_mtok": {
+  "pricing_usd_per_mtok": {
     "haiku": {
       "input": 0.1,
-      "input_over_100k": 0.5
+      "input_over_100k": 0.5,
+      "cache_read": 0.01,
+      "cache_read_over_100k": 0.05
     },
     "sonnet": {
-      "input": 2.0
+      "input": 2.0,
+      "cache_read": 0.2
     },
     "opus": {
-      "input": 4.0
+      "input": 4.0,
+      "cache_read": 0.2
     },
     "fable": {
-      "input": 10.0
+      "input": 10.0,
+      "cache_read": 0.25
     }
   },
-  "max_downgrade_usd": 0.25
+  "sample_rate": 0
 }

@@ -4,7 +4,8 @@ export type Decision = {
   level: Level
   confidence: number
   followup: number
-  model: string
+  model?: string
+  minModel?: string
   effort: Effort
   apply: boolean
   reason: string

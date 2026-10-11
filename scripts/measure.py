@@ -7,7 +7,7 @@ work = os.environ.get("MEASURE_DIR", os.path.join(os.getcwd(), "measure-out"))
 os.makedirs(work, exist_ok=True)
 name, ladder, force = sys.argv[1], json.loads(sys.argv[2]), sys.argv[3]
 cfg = os.path.join(work, f"{name}.router.json")
-json.dump({"ladder": ladder, "max_downgrade_usd": 100}, open(cfg, "w"))
+json.dump({"ladder": ladder}, open(cfg, "w"))
 env = dict(os.environ); env.pop("CLAUDECODE", None)
 env.update({"JEV_ROUTER_CONFIG": cfg, "JEV_ROUTER_FORCE": force, "JEV_ROUTER_STATE": os.path.join(work, "state-" + name)})
 argv = ["claude", "-p", "--plugin-dir", repo, "--model", os.environ.get("MEASURE_MODEL", "opus"), "--input-format", "stream-json", "--output-format", "stream-json", "--verbose", "--permission-mode", "bypassPermissions"]

@@ -1,6 +1,6 @@
 {
   "name": "jev-model-router",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "TypeSafe Jev scores each prompt and switches the session's model and effort to match, per turn.",
   "license": "MIT",
   "types": "./types/index.d.ts"

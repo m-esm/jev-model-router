@@ -19,6 +19,7 @@ LOG = STATE_DIR / "log.jsonl"
 EFFORTS = ("low", "medium", "high", "xhigh", "max")
 LEVELS = ("trivial", "routine", "hard", "frontier")
 FAMILIES = ("haiku", "sonnet", "opus", "fable")
+RANK = {f: i for i, f in enumerate(FAMILIES)}
 OFF_VALUES = ("0", "false", "off", "no")
 
 TOKENISH = re.compile(r"(?<![\w/.-])(?=[\w+/=-]*\d)(?=[\w+/=-]*[A-Za-z])[\w+/=-]{24,}")
@@ -183,11 +184,12 @@ def decide(answers: dict, cfg: dict, current_model: str | None, current_effort: 
     level, confidence = argmax_level(answers.get("level", {}))
     followup = float(answers.get("followup", {}).get("noul", 0.0))
     target = cfg["ladder"][level]
+    wanted = target.get("model") or target.get("min_model")
     out = {
         "level": level,
         "confidence": round(confidence, 3),
         "followup": round(followup, 3),
-        "model": target["model"],
+        "model": wanted,
         "effort": target["effort"],
         "current_model": current_model,
         "current_effort": current_effort,
@@ -200,11 +202,14 @@ def decide(answers: dict, cfg: dict, current_model: str | None, current_effort: 
     if confidence < cfg["min_confidence"]:
         out["reason"] = f"confidence {confidence:.2f} under {cfg['min_confidence']}"
         return out
-    model_change = current_model is not None and family(target["model"]) != current_model
-    effort_change = current_effort is not None and target["effort"] != current_effort
-    if model_change and transcript_bytes >= cfg["recache_guard_bytes"]:
+    want_rank = RANK.get(family(wanted) or "", -1)
+    cur_rank = RANK.get(current_model or "", -1)
+    model_change = wanted is not None and current_model is not None and want_rank != cur_rank
+    if model_change and want_rank < cur_rank and not target.get("model"):
         model_change = False
-        out["reason"] = "context is large, a model switch would re-cache it"
+    if model_change and want_rank < cur_rank:
+        out["reason"] = "downgrade: only worth it on a small context, check the plugin's cost gate"
+    effort_change = current_effort is not None and target["effort"] != current_effort
     if current_model is None and current_effort is None:
         out["action"] = "suggest"
     elif model_change and effort_change:
@@ -218,12 +223,12 @@ def decide(answers: dict, cfg: dict, current_model: str | None, current_effort: 
 
 def user_line(d: dict) -> str:
     parts = []
-    if d["action"] in ("model", "model+effort", "suggest"):
+    if d["action"] in ("model", "model+effort", "suggest") and d["model"]:
         parts.append(f"/model {d['model']}")
     if d["action"] in ("effort", "model+effort", "suggest"):
         parts.append(f"/effort {d['effort']}")
     now = f"{d['current_model'] or '?'}/{d['current_effort'] or '?'}"
-    return f"jev-router: {d['level']} prompt (p={d['confidence']:.2f}) wants {family(d['model'])}/{d['effort']}, now {now}. Run: " + " then ".join(parts)
+    return f"jev-router: {d['level']} prompt (p={d['confidence']:.2f}) wants {family(d['model']) or 'current model'}/{d['effort']}, now {now}. Run: " + " then ".join(parts)
 
 
 def context_block(d: dict) -> str:
@@ -239,7 +244,7 @@ def context_block(d: dict) -> str:
 
     return (
         f"JEV ROUTER: this prompt scored `{d['level']}` (p={d['confidence']:.2f}), "
-        f"fit {d['model']}/{d['effort']}. {depth}{switch}"
+        f"fit {family(d['model']) or 'current model'}/{d['effort']}. {depth}{switch}"
     )
 
 
@@ -301,6 +306,34 @@ def on_switched(data: dict) -> int:
     return 0
 
 
+def evaluate(path: str, cfg: dict) -> int:
+    rows = []
+    for line in Path(path).read_text().splitlines():
+        try:
+            r = json.loads(line)
+        except ValueError:
+            continue
+        if r.get("label") in LEVELS and r.get("prompt"):
+            rows.append(r)
+    if not rows:
+        print("no labeled rows: set `label` to trivial, routine, hard or frontier on rows in", path)
+        return 1
+    hits = 0
+    confusion: dict[str, dict[str, int]] = {l: {m: 0 for m in LEVELS} for l in LEVELS}
+    for r in rows:
+        resp = ask({"prompt": r["prompt"][: cfg["max_prompt_chars"]]}, {"level": QUESTIONS["level"]}, 8.0, cfg["jev_model"])
+        got, p = argmax_level(resp["answers"]["level"])
+        confusion[r["label"]][got] += 1
+        ok = got == r["label"]
+        hits += ok
+        print(("PASS " if ok else "FAIL ") + f"{r['label']:9s} got {got:9s} p={p:.2f}  {r['prompt'][:70]!r}")
+    print(f"\n{hits}/{len(rows)} agree with labels")
+    print("label \\ jev " + " ".join(f"{m:>9s}" for m in LEVELS))
+    for l in LEVELS:
+        print(f"{l:11s}" + " ".join(f"{confusion[l][m]:9d}" for m in LEVELS))
+    return 0 if hits == len(rows) else 1
+
+
 def report(days: int) -> int:
     cutoff = time.time() - days * 86400
     rows = []
@@ -337,11 +370,13 @@ def report(days: int) -> int:
 
 def main(argv: list[str]) -> int:
     if not argv or argv[0] in ("-h", "--help"):
-        print("usage: jev_router.py prompt|session|switched|report [--days N]|--test [--live]")
+        print("usage: jev_router.py prompt|session|switched|report [--days N]|eval <samples.jsonl>|--test [--live]")
         return 0
     if argv[0] == "--test":
         from tests.test_router import run
         return run(live="--live" in argv)
+    if argv[0] == "eval":
+        return evaluate(argv[1] if len(argv) > 1 else str(STATE_DIR / "samples.jsonl"), load_config())
     if argv[0] == "report":
         days = int(argv[argv.index("--days") + 1]) if "--days" in argv else 7
         return report(days)

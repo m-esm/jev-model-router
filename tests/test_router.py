@@ -48,30 +48,36 @@ def check(name: str, cond: bool, detail: str = "") -> bool:
 def offline() -> list[bool]:
     r = []
     d = jr.decide(fake_answers("trivial"), CFG, "opus", "high", 0)
-    r.append(check("trivial on opus/high asks for both", d["action"] == "model+effort" and jr.family(d["model"]) == "haiku" and d["effort"] == "low", d["action"]))
+    r.append(check("trivial on opus/high asks for effort only, never a downgrade", d["action"] == "effort" and d["effort"] == "low", d["action"]))
     d = jr.decide(fake_answers("hard"), CFG, "opus", "high", 0)
     r.append(check("hard on opus/high changes nothing", d["action"] == "none", d["action"]))
-    d = jr.decide(fake_answers("routine"), CFG, "sonnet", "high", 0)
-    r.append(check("routine on sonnet/high asks for effort only", d["action"] == "effort" and d["effort"] == "medium", d["action"]))
+    d = jr.decide(fake_answers("hard"), CFG, "sonnet", "high", 0)
+    r.append(check("hard on sonnet upgrades to opus", d["action"] == "model" and jr.family(d["model"]) == "opus", d["action"]))
+    d = jr.decide(fake_answers("frontier"), CFG, "sonnet", "medium", 0)
+    r.append(check("frontier folds into hard", d["action"] == "model+effort" and d["effort"] == "high", d["action"]))
+    d = jr.decide(fake_answers("routine"), CFG, "opus", "high", 0)
+    r.append(check("routine on opus/high asks for medium effort", d["action"] == "effort" and d["effort"] == "medium", d["action"]))
+    down = {**CFG, "ladder": {**CFG["ladder"], "trivial": {"model": "claude-haiku-5-5", "effort": "low"}}}
+    d = jr.decide(fake_answers("trivial"), down, "opus", "high", 0)
+    r.append(check("explicit downgrade rung is honored with a warning", d["action"] == "model+effort" and "downgrade" in d["reason"], d["reason"]))
     d = jr.decide(fake_answers("trivial", followup=0.9), CFG, "opus", "high", 0)
     r.append(check("follow-up keeps current setting", d["action"] == "none", d["reason"]))
     d = jr.decide(fake_answers("trivial", p=0.4), CFG, "opus", "high", 0)
     r.append(check("low confidence keeps current setting", d["action"] == "none", d["reason"]))
-    d = jr.decide(fake_answers("trivial"), CFG, "opus", "high", CFG["recache_guard_bytes"] + 1)
-    r.append(check("big context blocks the model switch, effort still moves", d["action"] == "effort", d["action"]))
-    d = jr.decide(fake_answers("frontier"), CFG, None, None, 0)
+    d = jr.decide(fake_answers("hard"), CFG, None, None, 0)
     r.append(check("unknown current state only suggests", d["action"] == "suggest", d["action"]))
     r.append(check("family parses model ids", jr.family("claude-opus-5-5") == "opus" and jr.family("claude-haiku-5-5[1m]") == "haiku" and jr.family(None) is None))
     red = jr.redact("key TYPESAFE_API_KEY=abc123def456ghi789jkl012mno345 and token: sk-ABCDEFGHIJKLMNOPQRSTUVWXYZ0123")
     r.append(check("redaction strips secrets", "abc123" not in red and "ABCDEFGHIJ" not in red, red))
     r.append(check("automated prompts are skipped", bool(jr.AUTOMATED_PROMPT.match("<scheduled-task id=1>")) and not jr.AUTOMATED_PROMPT.match("fix it")))
-    line = jr.user_line(jr.decide(fake_answers("trivial"), CFG, "opus", "high", 0))
-    r.append(check("user line names both commands", "/model claude-haiku-5-5" in line and "/effort low" in line, line))
+    line = jr.user_line(jr.decide(fake_answers("hard"), CFG, "sonnet", "medium", 0))
+    r.append(check("user line names both commands", "/model claude-opus-5-5" in line and "/effort high" in line, line))
     return r
 
 
 def hook_roundtrip() -> list[bool]:
     r = []
+    os.environ.pop("JEV_ROUTER_PLUGIN", None)
     with tempfile.TemporaryDirectory() as tmp:
         old_state, old_log = jr.STATE_DIR, jr.LOG
         jr.STATE_DIR = Path(tmp)
@@ -97,14 +103,16 @@ def hook_roundtrip() -> list[bool]:
             jr.ask_backup = jr.ask
             jr.ask = lambda *a, **k: {"answers": fake_answers("trivial"), "model": "fake"}
             try:
-                jr.on_session({"session_id": "s2", "model": "claude-opus-5-5"})
-                os.environ["CLAUDE_EFFORT"] = "high"
+                jr.ask = lambda *a, **k: {"answers": fake_answers("hard"), "model": "fake"}
+                jr.on_session({"session_id": "s2", "model": "claude-sonnet-5-5"})
+                os.environ["CLAUDE_EFFORT"] = "medium"
                 buf = io.StringIO()
                 with redirect_stdout(buf):
                     jr.on_prompt({"session_id": "s2", "prompt": "what does git stash pop do?", "transcript_path": "/nonexistent"})
                 out = json.loads(buf.getvalue())
-                r.append(check("model mismatch blocks the prompt with the /model command", out.get("decision") == "block" and "/model claude-haiku-5-5" in out.get("reason", ""), buf.getvalue()[:160]))
-                jr.on_switched({"session_id": "s2", "to_model": "claude-haiku-5-5", "source": "command"})
+                r.append(check("model mismatch blocks the prompt with the /model command", out.get("decision") == "block" and "/model claude-opus-5-5" in out.get("reason", ""), buf.getvalue()[:160]))
+                jr.on_switched({"session_id": "s2", "to_model": "claude-opus-5-5", "source": "command"})
+                jr.ask = lambda *a, **k: {"answers": fake_answers("trivial"), "model": "fake"}
                 buf = io.StringIO()
                 with redirect_stdout(buf):
                     jr.on_prompt({"session_id": "s2", "prompt": "what does git stash pop do?", "transcript_path": "/nonexistent"})
