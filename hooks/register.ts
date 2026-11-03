@@ -38,7 +38,7 @@ const QUESTIONS = {
 
 type Rung = { effort: Effort; model?: string; min_model?: string }
 type PriceRow = { input: number; input_over_100k?: number; cache_read: number; cache_read_over_100k?: number }
-type Config = {
+export type Config = {
   ladder: Record<Level, Rung>
   min_confidence: number
   followup_min: number
@@ -130,7 +130,7 @@ function argmaxLevel(answer: Answers['level']): { level: Level; confidence: numb
   return { level: LEVELS[idx], confidence: answer?.confidence ?? 0 }
 }
 
-function decide(answers: Answers, cfg: Config, at: number): Decision {
+export function decide(answers: Answers, cfg: Config, at: number): Decision {
   const { level, confidence } = argmaxLevel(answers.level)
   const followup = answers.followup?.noul ?? 0
   const target = cfg.ladder[level]
@@ -156,9 +156,9 @@ function cacheReadUsd(cfg: Config, fam: string | undefined, contextTokens: numbe
   return (contextTokens / 1_000_000) * read
 }
 
-type Pick = { model: string; kind: 'keep' | 'upgrade' | 'downgrade' | 'refused'; writeUsd: number; readUsd: number }
+export type Pick = { model: string; kind: 'keep' | 'upgrade' | 'downgrade' | 'refused'; writeUsd: number; readUsd: number }
 
-function pickModel(cfg: Config, decision: Decision, current: string, contextTokens: number): Pick {
+export function pickModel(cfg: Config, decision: Decision, current: string, contextTokens: number): Pick {
   const cur = family(current)
   const curRank = RANK[cur ?? ''] ?? -1
   const wanted = decision.model ?? decision.minModel
