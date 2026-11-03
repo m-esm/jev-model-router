@@ -5,6 +5,7 @@ import json
 import os
 import sys
 import tempfile
+import time
 from contextlib import redirect_stdout
 from pathlib import Path
 
@@ -127,6 +128,28 @@ def hook_roundtrip() -> list[bool]:
     return r
 
 
+def report_window() -> list[bool]:
+    r = []
+    with tempfile.TemporaryDirectory() as tmp:
+        old_log = jr.LOG
+        jr.LOG = Path(tmp) / "log.jsonl"
+        try:
+            plugin_row = {"ts": jr.now_iso(), "source": "plugin", "event": "decision", "level": "routine", "action": "effort", "ms": 300}
+            legacy_row = {"ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "event": "decision", "level": "hard", "action": "model", "ms": 400}
+            old_row = {"ts": "2020-01-01T00:00:00Z", "event": "decision", "level": "trivial", "action": "none", "ms": 1}
+            jr.LOG.write_text("\n".join(json.dumps(x) for x in (plugin_row, legacy_row, old_row)) + "\n")
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                jr.report(1)
+            out = buf.getvalue()
+            r.append(check("report counts hook-style UTC Z rows and legacy local-offset rows in the window", "last 1d: 2 decisions" in out))
+            r.append(check("now_iso writes UTC with a trailing Z", plugin_row["ts"].endswith("Z") and abs(jr.parse_ts(plugin_row["ts"]) - time.time()) < 5))
+            r.append(check("legacy local-offset ts parses to the same instant", abs(jr.parse_ts(legacy_row["ts"]) - time.time()) < 5))
+        finally:
+            jr.LOG = old_log
+    return r
+
+
 def live() -> list[bool]:
     r = []
     for prompt, want in LIVE_CASES:
@@ -141,7 +164,7 @@ def live() -> list[bool]:
 
 
 def run(live_too: bool = False, live: bool | None = None) -> int:
-    results = offline() + hook_roundtrip()
+    results = offline() + hook_roundtrip() + report_window()
     if live_too or live:
         try:
             results += globals()["live"]()

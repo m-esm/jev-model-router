@@ -9,6 +9,7 @@ import sys
 import time
 import urllib.error
 import urllib.request
+from datetime import datetime, timezone
 from pathlib import Path
 
 API_URL = "https://api.typesafe.ai/v1/systemone"
@@ -162,6 +163,21 @@ def write_state(session_id: str, data: dict) -> None:
         pass
 
 
+def now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+
+
+def parse_ts(raw: str) -> float:
+    text = raw.strip()
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    text = re.sub(r"([+-]\d{2})(\d{2})$", r"\1:\2", text)
+    dt = datetime.fromisoformat(text)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.timestamp()
+
+
 def log(row: dict) -> None:
     try:
         STATE_DIR.mkdir(parents=True, exist_ok=True)
@@ -270,7 +286,7 @@ def on_prompt(data: dict) -> int:
     if current_effort not in EFFORTS:
         current_effort = None
     t0 = time.monotonic()
-    row = {"ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "session": session_key(session_id), "chars": len(clean)}
+    row = {"ts": now_iso(), "session": session_key(session_id), "chars": len(clean)}
     try:
         resp = ask({"prompt": clean}, QUESTIONS, cfg["timeout_s"], cfg["jev_model"])
     except JevUnavailable as exc:
@@ -302,7 +318,7 @@ def on_switched(data: dict) -> int:
     session_id = str(data.get("session_id") or "")
     state = read_state(session_id)
     write_state(session_id, {**state, "model": data.get("to_model") or state.get("model")})
-    log({"ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "session": session_key(session_id), "event": "switched", "to": family(data.get("to_model")), "source": data.get("source")})
+    log({"ts": now_iso(), "session": session_key(session_id), "event": "switched", "to": family(data.get("to_model")), "source": data.get("source")})
     return 0
 
 
@@ -344,8 +360,8 @@ def report(days: int) -> int:
             except ValueError:
                 continue
             try:
-                ts = time.mktime(time.strptime(r["ts"][:19], "%Y-%m-%dT%H:%M:%S"))
-            except (KeyError, ValueError):
+                ts = parse_ts(r["ts"])
+            except (KeyError, ValueError, TypeError):
                 continue
             if ts >= cutoff:
                 rows.append(r)
@@ -394,7 +410,7 @@ def main(argv: list[str]) -> int:
         if argv[0] == "switched":
             return on_switched(data)
     except Exception as exc:
-        log({"ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "event": "error", "where": argv[0], "error": f"{type(exc).__name__}: {exc}"[:200]})
+        log({"ts": now_iso(), "event": "error", "where": argv[0], "error": f"{type(exc).__name__}: {exc}"[:200]})
         return 0
     print(f"unknown subcommand {argv[0]}", file=sys.stderr)
     return 0
